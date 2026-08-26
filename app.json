@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "WiFi Scanner",
+    "slug": "wifisc",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0a0f1e"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.wifisc.app",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "WiFi Scanner needs access to your local network to discover devices connected to the same WiFi."
+      }
+    },
+    "android": {
+      "package": "com.wifisc.app",
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.ACCESS_WIFI_STATE",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.INTERNET"
+      ]
+    },
+    "sdkVersion": "51.0.0"
+  }
+}
