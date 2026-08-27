@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import * as Network from 'expo-network';
-import { Device, probeIp, parseSubnet, generateIpRange } from '../utils/network';
+import { Device, probeAlive, enrichDevice, parseSubnet, generateIpRange } from '../utils/network';
 
 const BATCH_SIZE = 40;
 const PROBE_TIMEOUT_MS = 1500;
@@ -39,8 +39,6 @@ export function useNetworkScanner() {
       const networkState = await Network.getNetworkStateAsync();
       const ip = await Network.getIpAddressAsync();
 
-      // Reject loopback / unassigned. Accept WiFi, Ethernet, and UNKNOWN
-      // (iOS Simulator reports UNKNOWN even though it shares the Mac's WiFi).
       if (!ip || ip === '0.0.0.0' || ip === '127.0.0.1') {
         setState(s => ({
           ...s,
@@ -73,18 +71,41 @@ export function useNetworkScanner() {
 
         const batch = allIps.slice(i, i + BATCH_SIZE);
         const results = await Promise.all(
-          batch.map(batchIp => probeIp(batchIp, PROBE_TIMEOUT_MS))
+          batch.map(batchIp => probeAlive(batchIp, PROBE_TIMEOUT_MS)),
         );
 
-        const found = results.filter((r): r is Device => r !== null);
-        scanned += batch.length;
+        const alive = results.filter(
+          (r): r is { ip: string; responseTime: number } => r !== null,
+        );
 
-        setState(s => ({
-          ...s,
-          devices: found.length > 0 ? [...s.devices, ...found] : s.devices,
-          scanned,
-          progress: scanned / allIps.length,
-        }));
+        // Add placeholders immediately so devices appear as found
+        if (alive.length > 0) {
+          const placeholders: Device[] = alive.map(({ ip: aIp, responseTime }) => ({
+            ip: aIp,
+            responseTime,
+            hostname: null,
+            deviceType: 'Scanning…',
+            openPorts: [],
+            httpTitle: null,
+            serverInfo: null,
+            macAddress: null,
+            enriched: false,
+          }));
+          setState(s => ({ ...s, devices: [...s.devices, ...placeholders] }));
+
+          // Enrich each host in background; replace placeholder when done
+          alive.forEach(({ ip: aIp, responseTime }) => {
+            enrichDevice(aIp, responseTime).then(enriched => {
+              setState(s => ({
+                ...s,
+                devices: s.devices.map(d => d.ip === aIp ? enriched : d),
+              }));
+            });
+          });
+        }
+
+        scanned += batch.length;
+        setState(s => ({ ...s, scanned, progress: scanned / allIps.length }));
       }
     } catch (e: any) {
       setState(s => ({ ...s, error: e?.message ?? 'Scan failed unexpectedly.' }));

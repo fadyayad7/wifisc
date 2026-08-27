@@ -102,6 +102,15 @@ export default function App() {
         </View>
       )}
 
+      {/* MAC address sandbox note — shown once any scan has run */}
+      {(state.scanned > 0 || state.devices.length > 0) && (
+        <View style={styles.macNoteBanner}>
+          <Text style={styles.macNoteText}>
+            MAC addresses require native ARP access — unavailable in Expo Go sandbox
+          </Text>
+        </View>
+      )}
+
       {/* Device list */}
       <FlatList
         data={sortedDevices}
@@ -239,6 +248,20 @@ const styles = StyleSheet.create({
     color: '#7dd3fc',
     fontSize: 12,
     lineHeight: 17,
+  },
+  macNoteBanner: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    backgroundColor: '#111827',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: '#1f2937',
+  },
+  macNoteText: {
+    color: '#374151',
+    fontSize: 11,
   },
 
   // List
