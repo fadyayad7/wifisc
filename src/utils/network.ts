@@ -62,9 +62,40 @@ const PROBE_PORTS: ServicePort[] = [
 // ── TCP probe ─────────────────────────────────────────────────────────────────
 
 type ProbeResult =
-  | 'open'      // TCP handshake completed
-  | 'refused'   // RST came back — host is there, port is not
-  | 'timeout';  // nothing answered — host down or packet filtered
+  | 'open'          // TCP handshake completed — something is at this address
+  | 'refused'       // RST came back — something is at this address, port is not
+  | 'unreachable'   // connect failed for a reason that proves nothing
+  | 'timeout';      // nothing answered at all
+
+// react-native-tcp-socket collapses NSError down to its localizedDescription before
+// it reaches JS, so the POSIX errno is gone by the time we see it and the reason has
+// to be read back out of the message.
+//
+// This distinction is the whole ballgame. ECONNREFUSED means a host sent an RST,
+// which proves it exists. "No route to host" (EHOSTUNREACH — the kernel ARPed for
+// the address and nothing answered), "Operation timed out", and local failures such
+// as running out of file descriptors all mean we learned nothing. Treating that
+// second group as proof of life invents devices that are not on the network.
+//
+// Foundation localises these strings. On a non-English device nothing matches and
+// the scan degrades to reporting only hosts that complete a full handshake — it
+// under-reports rather than inventing devices, which is the right way to fail.
+const CONNECTION_REFUSED = /connection refused|econnrefused/i;
+
+// The library emits an Error on some paths and a bare string on others.
+function describeSocketError(err: Error): string {
+  return String(err?.message ?? err ?? '');
+}
+
+// Every unfamiliar error string is a host we are now calling absent, so surface each
+// distinct one once in development. If a real device shows up here, this regex is
+// what needs widening.
+const seenSocketErrors = new Set<string>();
+function reportUnrecognisedError(reason: string): void {
+  if (!reason || seenSocketErrors.has(reason)) return;
+  seenSocketErrors.add(reason);
+  console.warn(`[scan] treating as absent, unrecognised socket error: "${reason}"`);
+}
 
 /**
  * Raw TCP connect. Replaces the old fetch()-timing heuristics: connect() either
@@ -89,7 +120,15 @@ function tcpProbe(
     };
 
     const socket = TcpSocket.createConnection({ host: ip, port }, () => finish('open'));
-    socket.on('error', () => finish('refused'));
+    socket.on('error', err => {
+      const reason = describeSocketError(err);
+      if (CONNECTION_REFUSED.test(reason)) {
+        finish('refused');
+        return;
+      }
+      if (__DEV__) reportUnrecognisedError(reason);
+      finish('unreachable');
+    });
     const timer = setTimeout(() => finish('timeout'), timeoutMs);
   });
 }
@@ -97,19 +136,24 @@ function tcpProbe(
 // ── Phase 1: alive check ──────────────────────────────────────────────────────
 
 /**
- * Quick alive probe on port 80.
- * - timeout  → host unreachable → null
- * - refused  → host alive, port 80 closed → {ip, responseTime}
- * - open     → host alive, HTTP running   → {ip, responseTime}
+ * Quick alive probe on port 80. Reports a device only when the address itself
+ * answered: a completed handshake, or an RST proving something holds that IP even
+ * though port 80 is shut.
  *
- * Hosts that silently drop packets instead of sending RST still read as down.
+ * Everything else counts as absent. This is deliberately biased towards
+ * under-reporting — a phantom row is worse than a missing one, because it asserts
+ * something about the user's network that is not true.
+ *
+ * Known blind spot: hosts that silently drop packets instead of sending RST are
+ * indistinguishable from empty addresses, and read as down.
  */
 export async function probeAlive(
   ip: string,
   timeoutMs: number,
 ): Promise<{ ip: string; responseTime: number } | null> {
   const { result, elapsed } = await tcpProbe(ip, 80, timeoutMs);
-  return result === 'timeout' ? null : { ip, responseTime: elapsed };
+  const answered = result === 'open' || result === 'refused';
+  return answered ? { ip, responseTime: elapsed } : null;
 }
 
 // ── Phase 2: enrichment helpers ───────────────────────────────────────────────

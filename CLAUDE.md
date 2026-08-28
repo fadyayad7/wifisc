@@ -51,11 +51,25 @@ Phase 1 sweeps all 254 IPs in batches of 40 (`BATCH_SIZE`), awaiting each batch 
 ### TCP probing
 
 `tcpProbe` is the single primitive both scan phases sit on: a raw
-`react-native-tcp-socket` connect resolving to `'open'` | `'refused'` | `'timeout'`.
-Open vs closed is now a fact from `connect()`, not an inference from elapsed time.
+`react-native-tcp-socket` connect resolving to `'open'` | `'refused'` |
+`'unreachable'` | `'timeout'`. Open vs closed is a fact from `connect()`, not an
+inference from elapsed time.
 
-- **`probeAlive`** — connects to port 80. `timeout` = host down → `null`. `refused`
-  (RST) = host **alive** with port 80 closed. `open` = alive, HTTP running.
+**`'refused'` vs `'unreachable'` is load-bearing — do not collapse them.** The
+library flattens `NSError` to `localizedDescription` before it reaches JS
+(`TcpSockets.m`), so the POSIX errno is gone and the reason has to be matched out of
+the message with `CONNECTION_REFUSED`. Only ECONNREFUSED proves a host exists.
+EHOSTUNREACH ("No route to host" — the kernel ARPed and nothing answered), timeouts,
+and local failures like fd exhaustion prove nothing. An earlier version treated every
+error as `'refused'` and reported a device for most of the empty subnet.
+
+These strings are localised by Foundation. On a non-English device nothing matches
+and the scan reports only hosts completing a full handshake — under-reporting, never
+inventing. In `__DEV__`, each unrecognised error string is logged once; a real device
+appearing there means the regex needs widening.
+
+- **`probeAlive`** — connects to port 80. `'open'` or `'refused'` = present.
+  Anything else = absent.
 - **`isPortOpen`** — `'open'` only.
 
 `PORT_TIMEOUT_MS` (800) is a calibration constant, not a magic number — retune for
@@ -67,7 +81,9 @@ this cap risks exhausting the process fd limit on a busy subnet. `fetch()` used 
 pool connections for us; raw sockets do not.
 
 Remaining blind spot: hosts that silently drop packets rather than sending RST are
-indistinguishable from absent hosts, and still read as down.
+indistinguishable from absent hosts, and still read as down. That trade is
+deliberate — a phantom row asserts something false about the user's network, so the
+probe is biased towards missing hosts rather than inventing them.
 
 ### Device classification
 
