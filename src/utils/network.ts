@@ -1,3 +1,8 @@
+import TcpSocket from 'react-native-tcp-socket';
+
+import { lookupMac } from '../../modules/arp';
+import { mdnsLookup } from './mdns';
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ServicePort {
@@ -28,8 +33,9 @@ export interface Device {
   openPorts: ServicePort[];
   httpTitle: string | null;
   serverInfo: string | null;
-  // MAC address requires native ARP table access (unavailable in Expo Go sandbox)
-  macAddress: null;
+  // Read from the kernel ARP cache (iOS only, and only for hosts we just probed).
+  // null whenever the cache has no resolved hardware address for the IP.
+  macAddress: string | null;
   enriched: boolean;
 }
 
@@ -53,52 +59,72 @@ const PROBE_PORTS: ServicePort[] = [
   { port: 32400, name: 'Plex'     },
 ];
 
+// ── TCP probe ─────────────────────────────────────────────────────────────────
+
+type ProbeResult =
+  | 'open'      // TCP handshake completed
+  | 'refused'   // RST came back — host is there, port is not
+  | 'timeout';  // nothing answered — host down or packet filtered
+
+/**
+ * Raw TCP connect. Replaces the old fetch()-timing heuristics: connect() either
+ * succeeds, is refused, or times out, so open/closed is now a fact rather than
+ * an inference from elapsed milliseconds.
+ */
+function tcpProbe(
+  ip: string,
+  port: number,
+  timeoutMs: number,
+): Promise<{ result: ProbeResult; elapsed: number }> {
+  return new Promise(resolve => {
+    const start = Date.now();
+    let settled = false;
+
+    const finish = (result: ProbeResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ result, elapsed: Date.now() - start });
+    };
+
+    const socket = TcpSocket.createConnection({ host: ip, port }, () => finish('open'));
+    socket.on('error', () => finish('refused'));
+    const timer = setTimeout(() => finish('timeout'), timeoutMs);
+  });
+}
+
 // ── Phase 1: alive check ──────────────────────────────────────────────────────
 
 /**
  * Quick alive probe on port 80.
- * - AbortError (timeout) → host unreachable → null
- * - Any other error (TCP RST) → host alive, port closed → {ip, responseTime}
- * - Success → host alive, HTTP running → {ip, responseTime}
+ * - timeout  → host unreachable → null
+ * - refused  → host alive, port 80 closed → {ip, responseTime}
+ * - open     → host alive, HTTP running   → {ip, responseTime}
+ *
+ * Hosts that silently drop packets instead of sending RST still read as down.
  */
 export async function probeAlive(
   ip: string,
   timeoutMs: number,
 ): Promise<{ ip: string; responseTime: number } | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const start = Date.now();
-  try {
-    await fetch(`http://${ip}`, { method: 'HEAD', signal: controller.signal });
-    clearTimeout(timer);
-    return { ip, responseTime: Date.now() - start };
-  } catch (e: any) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') return null;
-    return { ip, responseTime: Date.now() - start };
-  }
+  const { result, elapsed } = await tcpProbe(ip, 80, timeoutMs);
+  return result === 'timeout' ? null : { ip, responseTime: elapsed };
 }
 
 // ── Phase 2: enrichment helpers ───────────────────────────────────────────────
 
+// Tuning knob: raise on slow/congested networks, lower to speed up enrichment.
+const PORT_TIMEOUT_MS = 800;
+
+// Concurrent port probes per host. Every probe holds a real file descriptor now,
+// and enrichment runs for all alive hosts at once, so this is what keeps a busy
+// subnet from exhausting the process fd limit.
+const PORT_CONCURRENCY = 5;
+
 async function isPortOpen(ip: string, port: number): Promise<boolean> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 800);
-  const start = Date.now();
-  try {
-    await fetch(`http://${ip}:${port}`, { method: 'HEAD', signal: controller.signal });
-    clearTimeout(timer);
-    return true; // HTTP responded
-  } catch (e: any) {
-    clearTimeout(timer);
-    const elapsed = Date.now() - start;
-    if (e.name === 'AbortError') return false; // filtered / no host
-    // iOS gives the same "Network request failed" for both RST (port closed) and
-    // protocol mismatch (port open but non-HTTP). Distinguish via timing:
-    //   fast  (<150ms) = TCP RST came back immediately = port CLOSED
-    //   slow  (≥150ms) = TCP connected, then failed on protocol = port OPEN
-    return elapsed >= 150;
-  }
+  const { result } = await tcpProbe(ip, port, PORT_TIMEOUT_MS);
+  return result === 'open';
 }
 
 async function fetchHttpMeta(
@@ -121,25 +147,6 @@ async function fetchHttpMeta(
   } catch {
     clearTimeout(timer);
     return { title: null, server: null };
-  }
-}
-
-async function resolveHostname(ip: string): Promise<string | null> {
-  const ptr = ip.split('.').reverse().join('.') + '.in-addr.arpa';
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 1500);
-  try {
-    const res = await fetch(
-      `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(ptr)}&type=PTR`,
-      { headers: { Accept: 'application/dns-json' }, signal: controller.signal },
-    );
-    clearTimeout(timer);
-    const data = await res.json() as { Answer?: Array<{ data: string }> };
-    const record = data.Answer?.[0]?.data;
-    return record ? record.replace(/\.$/, '') : null;
-  } catch {
-    clearTimeout(timer);
-    return null;
   }
 }
 
@@ -184,31 +191,34 @@ function classifyDevice(
 // ── Phase 2: full enrichment ──────────────────────────────────────────────────
 
 export async function enrichDevice(ip: string, responseTime: number): Promise<Device> {
-  const portChecks = await Promise.all(
-    PROBE_PORTS.map(async ({ port, name }) => ({
-      port, name, open: await isPortOpen(ip, port),
-    })),
-  );
-  const openPorts = portChecks.filter(p => p.open).map(({ port, name }) => ({ port, name }));
+  const openPorts: ServicePort[] = [];
+  for (let i = 0; i < PROBE_PORTS.length; i += PORT_CONCURRENCY) {
+    const chunk = PROBE_PORTS.slice(i, i + PORT_CONCURRENCY);
+    const checks = await Promise.all(
+      chunk.map(async ({ port, name }) => ({ port, name, open: await isPortOpen(ip, port) })),
+    );
+    openPorts.push(...checks.filter(c => c.open).map(({ port, name }) => ({ port, name })));
+  }
   const openNums  = openPorts.map(p => p.port);
 
   const httpPort = openNums.find(p => [80, 8080].includes(p));
-  const [httpMeta, hostname] = await Promise.all([
-    httpPort
-      ? fetchHttpMeta(ip, httpPort)
-      : Promise.resolve({ title: null, server: null }),
-    resolveHostname(ip),
-  ]);
+  const httpMeta = httpPort
+    ? await fetchHttpMeta(ip, httpPort)
+    : { title: null, server: null };
 
   return {
     ip,
     responseTime,
-    hostname,
+    // May still be null here if mDNS has not answered yet; useNetworkScanner
+    // patches late arrivals into the rendered device.
+    hostname: mdnsLookup(ip),
     deviceType: classifyDevice(ip, openNums, httpMeta.server, httpMeta.title),
     openPorts,
     httpTitle: httpMeta.title,
     serverInfo: httpMeta.server,
-    macAddress: null,
+    // Read after the port sweep — those connections are what put this host in
+    // the ARP cache in the first place.
+    macAddress: lookupMac(ip),
     enriched: true,
   };
 }

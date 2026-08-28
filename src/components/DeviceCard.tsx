@@ -88,10 +88,16 @@ export function DeviceCard({ device, isLocal }: Props) {
         <Text style={styles.hostnameAbsent}>no open ports detected</Text>
       ) : null}
 
-      {/* ── Row 5: MAC (always unavailable in sandbox) ── */}
+      {/* ── Row 5: MAC, when the kernel ARP cache has one ── */}
       <Text style={styles.macRow}>
         <Text style={styles.metaLabel}>MAC     </Text>
-        <Text style={styles.macValue}>— (sandbox restriction)</Text>
+        {device.macAddress ? (
+          <Text style={styles.macFound}>{device.macAddress}</Text>
+        ) : (
+          <Text style={styles.macValue}>
+            {device.enriched ? '— not in ARP cache' : '—'}
+          </Text>
+        )}
       </Text>
     </View>
   );
@@ -212,5 +218,9 @@ const styles = StyleSheet.create({
   macValue: {
     color: '#1f2937',
     fontStyle: 'italic',
+  },
+  macFound: {
+    color: '#9ca3af',
+    fontFamily: 'monospace',
   },
 });

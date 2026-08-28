@@ -12,7 +12,17 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.wifisc.app",
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "WiFi Scanner needs access to your local network to discover devices connected to the same WiFi."
+        "NSLocalNetworkUsageDescription": "WiFi Scanner needs access to your local network to discover devices connected to the same WiFi.",
+        "NSBonjourServices": [
+          "_workstation._tcp",
+          "_device-info._tcp",
+          "_smb._tcp",
+          "_http._tcp",
+          "_airplay._tcp",
+          "_googlecast._tcp",
+          "_ipp._tcp",
+          "_ssh._tcp"
+        ]
       }
     },
     "android": {

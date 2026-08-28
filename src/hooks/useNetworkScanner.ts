@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react';
 import * as Network from 'expo-network';
 import { Device, probeAlive, enrichDevice, parseSubnet, generateIpRange } from '../utils/network';
+import { discoverMdnsNames } from '../utils/mdns';
 
 const BATCH_SIZE = 40;
 const PROBE_TIMEOUT_MS = 1500;
@@ -63,6 +64,20 @@ export function useNetworkScanner() {
       const allIps = generateIpRange(subnet);
 
       setState(s => ({ ...s, localIp: ip, subnet, total: allIps.length }));
+
+      // Bonjour discovery runs alongside the sweep on its own clock. Names that
+      // land after a device was enriched are patched into the rendered row, the
+      // same placeholder/replace contract enrichment uses.
+      discoverMdnsNames(
+        (foundIp, hostname) =>
+          setState(s => ({
+            ...s,
+            devices: s.devices.map(d =>
+              d.ip === foundIp && !d.hostname ? { ...d, hostname } : d,
+            ),
+          })),
+        () => cancelRef.current,
+      ).catch(() => {}); // best-effort: a failed browse just means no names
 
       let scanned = 0;
 

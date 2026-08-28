@@ -13,6 +13,7 @@ import {
 import { useNetworkScanner } from './src/hooks/useNetworkScanner';
 import { DeviceCard } from './src/components/DeviceCard';
 import { lastOctet } from './src/utils/network';
+import { isArpAvailable } from './modules/arp';
 
 export default function App() {
   const { state, startScan, stopScan } = useNetworkScanner();
@@ -52,6 +53,12 @@ export default function App() {
   const sortedDevices = [...state.devices].sort(
     (a, b) => lastOctet(a.ip) - lastOctet(b.ip)
   );
+
+  // The ARP cache is best-effort: absent entirely off iOS, and it can come back
+  // empty even on iOS. Explain the blank MAC column only when nothing resolved.
+  const enrichedDevices = sortedDevices.filter(d => d.enriched);
+  const noMacsResolved =
+    enrichedDevices.length > 0 && enrichedDevices.every(d => !d.macAddress);
 
   return (
     <SafeAreaView style={styles.root}>
@@ -102,11 +109,13 @@ export default function App() {
         </View>
       )}
 
-      {/* MAC address sandbox note — shown once any scan has run */}
-      {(state.scanned > 0 || state.devices.length > 0) && (
+      {/* MAC availability note — only when no device resolved one */}
+      {noMacsResolved && (
         <View style={styles.macNoteBanner}>
           <Text style={styles.macNoteText}>
-            MAC addresses require native ARP access — unavailable in Expo Go sandbox
+            {isArpAvailable
+              ? 'No MAC addresses in the ARP cache — the OS may be withholding them.'
+              : 'MAC addresses need native ARP access, available on iOS only.'}
           </Text>
         </View>
       )}

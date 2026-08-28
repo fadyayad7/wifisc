@@ -6,9 +6,10 @@ node_modules/
 dist/
 web-build/
 
-# Native build outputs
-ios/
-android/
+# Native build outputs (prebuild artifacts at the repo root only — these patterns
+# are anchored so they don't swallow native module sources like modules/*/ios/)
+/ios/
+/android/
 
 # Build artifacts
 *.jks
